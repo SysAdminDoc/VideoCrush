@@ -1,10 +1,8 @@
 # VideoCrush
 
-<<<<<<< HEAD
 ![Screenshot](screenshot.png)
 
 # VideoCrush
-=======
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Language](https://img.shields.io/badge/language-Python-3776AB)
 ![Type](https://img.shields.io/badge/type-Desktop%20App-brightgreen)
@@ -44,4 +42,3 @@ Dependencies auto-install on first run. Requires FFmpeg (auto-detected).
 ## License
 
 MIT License
->>>>>>> 24f8294cb024e003e3c11ce36e2c131877ca5d11

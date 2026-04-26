@@ -7,6 +7,25 @@ Target-size video compression with 2-pass encoding via FFmpeg.
 import sys, os, subprocess, json, time, re, shutil, math
 from pathlib import Path
 
+
+# codex-branding:start
+def _branding_icon_path() -> Path:
+    candidates = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "icon.png")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "icon.png")
+    current = Path(__file__).resolve()
+    candidates.extend([current.parent / "icon.png", current.parent.parent / "icon.png", current.parent.parent.parent / "icon.png"])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return Path("icon.png")
+# codex-branding:end
+
+
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
 def _bootstrap():
     if sys.version_info < (3, 8):
@@ -778,6 +797,8 @@ class VideoCompressorWindow(QMainWindow):
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
+    branding_icon = QIcon(str(_branding_icon_path()))
+    app.setWindowIcon(branding_icon)
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_STYLE)
 
@@ -795,6 +816,8 @@ def main():
     app.setPalette(palette)
 
     window = VideoCompressorWindow()
+
+    window.setWindowIcon(branding_icon)
     window.show()
     sys.exit(app.exec())
 

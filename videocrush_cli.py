@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from videocrush_automation import (
     build_task_scheduler_command,
@@ -35,6 +36,7 @@ from videocrush_core import (
     run_compression,
     settings_from_profile,
 )
+from videocrush_distribution import DEFAULT_REPOSITORY, check_for_update
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -45,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"VideoCrush {VERSION}")
     parser.add_argument("--input", "-i", help="Input video file or folder.")
     parser.add_argument("--out", "--output", "-o", help="Output folder or exact output file.")
+    parser.add_argument("--portable", action="store_true", help="Keep queue state in a local data folder beside the app.")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel batch workers (default: 4; use 1 for sequential output).")
+    parser.add_argument("--check-update", action="store_true", help="Check the latest public release and exit when no input is given.")
+    parser.add_argument("--update-repo", default=DEFAULT_REPOSITORY, help="GitHub owner/repository used by --check-update.")
     parser.add_argument("--preset", default="web-1080p", help="Compression profile.")
     parser.add_argument("--recursive", action="store_true", help="Recurse into subfolders when input is a folder.")
     parser.add_argument("--extensions", help="Comma-separated extension filter, such as mp4,mkv.")
@@ -256,16 +262,61 @@ def _process_item(
             temporary.cleanup()
 
 
+def _process_items(
+    args: argparse.Namespace,
+    jobs: List[Tuple[Path, str]],
+    output: Path,
+    profiles: Dict[str, object],
+    multiple: bool,
+) -> List[Tuple[Path, bool]]:
+    def process(job: Tuple[Path, str]) -> Tuple[Path, bool]:
+        item, preset = job
+        return item, _process_item(args, item, output, preset, profiles, multiple)
+
+    if len(jobs) <= 1 or args.workers <= 1:
+        return [process(job) for job in jobs]
+    worker_count = min(max(1, args.workers), len(jobs))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="videocrush") as executor:
+        return list(executor.map(process, jobs))
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parser().parse_args(argv)
+    if args.workers < 1:
+        _emit(args, {"ok": False, "error": "--workers must be at least 1."})
+        return 2
+    if args.portable:
+        os.environ["VIDEOCRUSH_PORTABLE"] = "1"
     profiles = dict(PRESET_PROFILES)
     try:
+        if args.check_update:
+            update = check_for_update(repository=args.update_repo)
+            _emit(
+                args,
+                {
+                    "ok": True,
+                    "current_version": update.current_version,
+                    "latest_version": update.latest_version,
+                    "update_available": update.update_available,
+                    "release_url": update.release_url,
+                    "message": (
+                        f"VideoCrush {update.current_version} is current."
+                        if not update.update_available
+                        else f"VideoCrush {update.latest_version} is available: {update.release_url}"
+                    ),
+                },
+            )
+            if not args.input and not args.watch and not args.schedule:
+                return 0
         if args.import_presets:
             profiles.update(import_presets(Path(args.import_presets).expanduser().resolve()))
         if args.export_presets:
             path = export_presets(Path(args.export_presets).expanduser().resolve(), profiles)
             _emit(args, {"ok": True, "presets": str(path), "message": f"Wrote presets: {path}"})
         if args.context_menu:
+            if args.portable:
+                _emit(args, {"ok": False, "error": "Portable mode does not write Explorer registry entries."})
+                return 2
             if args.context_menu == "install":
                 install_context_menu(Path(sys.argv[0]).resolve(), args.preset)
                 _emit(args, {"ok": True, "message": "Installed the current-user VideoCrush context-menu action."})
@@ -322,6 +373,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures = 0
             while True:
                 discovered = discover_watch_files(Path(args.watch), seen, rules, recursive=args.recursive)
+                jobs = []
                 for item, _ in discovered:
                     preset = route_watch_file(item, rules, args.preset)
                     if preset not in profiles:
@@ -329,7 +381,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         failures += 1
                         seen.add(str(item.resolve()).lower())
                         continue
-                    if _process_item(args, item, output, preset, profiles, multiple=True):
+                    jobs.append((item, preset))
+                results = _process_items(args, jobs, output, profiles, multiple=True)
+                for item, success in results:
+                    if success:
                         seen.add(str(item.resolve()).lower())
                     else:
                         failures += 1
@@ -351,7 +406,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         multiple = len(inputs) > 1
         if multiple or input_path.is_dir():
             output.mkdir(parents=True, exist_ok=True)
-        failures = sum(not _process_item(args, item, output, args.preset, profiles, multiple or input_path.is_dir()) for item in inputs)
+        results = _process_items(
+            args,
+            [(item, args.preset) for item in inputs],
+            output,
+            profiles,
+            multiple or input_path.is_dir(),
+        )
+        failures = sum(not success for _, success in results)
         if failures == 0 and args.after_queue != "none" and not args.dry_run:
             perform_power_action(args.after_queue)
         return 1 if failures else 0

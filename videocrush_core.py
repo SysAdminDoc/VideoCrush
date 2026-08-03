@@ -13,6 +13,7 @@ import platform
 import re
 import shlex
 import shutil
+import sys
 import subprocess
 import time
 import threading
@@ -265,12 +266,24 @@ class CompressionResult:
 
 
 def find_binary(name: str) -> Optional[str]:
-    """Find an executable in PATH and common Windows FFmpeg locations."""
+    """Find an executable in a bundled build, PATH, or common FFmpeg locations."""
 
-    candidates = [name]
+    executable_names = [name]
     if os.name == "nt" and not name.lower().endswith(".exe"):
-        candidates.append(name + ".exe")
-    for candidate in candidates:
+        executable_names.append(name + ".exe")
+    if name in {"ffmpeg", "ffprobe"}:
+        bundled_roots = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bundled_roots.append(Path(meipass))
+        if getattr(sys, "frozen", False):
+            bundled_roots.append(Path(sys.executable).resolve().parent)
+        for root in bundled_roots:
+            for executable_name in executable_names:
+                candidate = root / executable_name
+                if candidate.is_file():
+                    return str(candidate)
+    for candidate in executable_names:
         path = shutil.which(candidate)
         if path:
             return path

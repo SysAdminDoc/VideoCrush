@@ -891,6 +891,8 @@ VideoCompressorWindow = QueueVideoCompressorWindow
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def main():
+    if "--portable" in sys.argv:
+        os.environ["VIDEOCRUSH_PORTABLE"] = "1"
     app = QApplication(sys.argv)
     branding_icon = QIcon(str(_branding_icon_path()))
     app.setWindowIcon(branding_icon)

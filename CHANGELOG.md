@@ -13,6 +13,7 @@ All notable changes to VideoCrush will be documented in this file.
 - Added versioned preset JSON exchange, watch-folder extension routing, explicit Task Scheduler/context-menu helpers, and opt-in post-queue sleep/shutdown actions.
 - Added persisted quality reports with before/after thumbnail strips, SSIM/VMAF metrics, file-size deltas, palette-optimized GIF creation, scene detection, optional URL/Whisper/upscaler adapters, image-sibling optimization, and battery-aware encoding.
 - Moved hardware encoder verification off the GUI's first-window path so packaged startup stays responsive while retaining verified hardware defaults.
+- Added a bundled-FFmpeg PyInstaller build script, portable local queue storage, a read-only release update check, and four-worker CLI batch processing.
 
 ## [v0.1.0] - %Y->- (HEAD -> main, origin/main, origin/HEAD)
 

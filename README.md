@@ -29,6 +29,10 @@ python video_compressor.py
 
 Dependencies auto-install on first run. Requires FFmpeg (auto-detected).
 
+For a portable one-file Windows build with FFmpeg and ffprobe embedded, run
+`pwsh -File .\build.ps1`; the resulting `dist\VideoCrush.exe` keeps queue
+state beside the executable when started with `--portable`.
+
 The same encoder is available without a GUI for automation:
 
 ```bash
@@ -44,6 +48,10 @@ Use `--mode quality --crf 24` for quality-targeted output, `--dry-run` to
 inspect the generated FFmpeg invocation, and `--export-script commands.bat`
 to save a reproducible command script. The CLI accepts a file or folder and
 can emit JSON results with `--json`.
+
+Folder jobs use four workers by default; set `--workers 1` for sequential
+processing. `--check-update` performs a read-only check of the latest public
+GitHub release.
 
 Preset JSON files can be imported with `--import-presets`. The watch mode
 routes extensions to profiles and supports `--watch-once` for scheduled runs.

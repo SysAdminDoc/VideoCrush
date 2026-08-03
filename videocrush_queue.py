@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -185,7 +186,15 @@ class QueueStore:
         os.replace(temporary, self.path)
 
 
-def default_queue_path() -> Path:
+def default_queue_path(portable: Optional[bool] = None) -> Path:
+    if portable is None:
+        portable = os.environ.get("VIDEOCRUSH_PORTABLE", "").lower() in {"1", "true", "yes"}
+    if portable:
+        if getattr(sys, "frozen", False):
+            root = Path(sys.executable).resolve().parent
+        else:
+            root = Path(__file__).resolve().parent
+        return root / "data" / "queue.json"
     if os.name == "nt":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
     else:

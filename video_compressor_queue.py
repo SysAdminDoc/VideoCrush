@@ -30,7 +30,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from videocrush_core import PRESET_PROFILES, VideoCrushError, collect_input_files, settings_from_profile
+from videocrush_core import (
+    PRESET_PROFILES,
+    VideoCrushError,
+    choose_hardware_encoder,
+    collect_input_files,
+    hardware_accelerators,
+    settings_from_profile,
+    supported_encoders,
+)
 from videocrush_queue import JobQueue, QueueStore, default_queue_path
 
 # video_compressor imports this module only after its legacy helpers and shared
@@ -88,6 +96,13 @@ class QueueVideoCompressorWindow(QMainWindow):
         header.addStretch()
         ffmpeg_available = bool(find_ffmpeg())
         ffmpeg_status = QLabel("FFmpeg ready" if ffmpeg_available else "FFmpeg not found!")
+        available_encoders = supported_encoders() if ffmpeg_available else {}
+        preferred_hardware = choose_hardware_encoder(available_encoders)
+        accelerators = hardware_accelerators() if ffmpeg_available else []
+        if preferred_hardware:
+            ffmpeg_status.setText(f"FFmpeg ready · HW default: {preferred_hardware}")
+        elif accelerators:
+            ffmpeg_status.setText("FFmpeg ready · HW: " + ", ".join(accelerators[:2]))
         ffmpeg_status.setStyleSheet(
             "color: #a6e3a1; font-size: 12px; font-weight: bold;"
             if ffmpeg_available
@@ -201,7 +216,11 @@ class QueueVideoCompressorWindow(QMainWindow):
         settings_grid.addWidget(QLabel("Video Codec"), 4, 0)
         self.codec_combo = QComboBox()
         for name, codec in VIDEO_CODECS.items():
-            self.codec_combo.addItem(name, codec)
+            software = codec in {"libx264", "libx265", "libvpx-vp9", "libsvtav1", "libaom-av1", "ffv1"}
+            if software or codec in available_encoders.values():
+                self.codec_combo.addItem(name, codec)
+        if preferred_hardware:
+            self._set_combo_data(self.codec_combo, preferred_hardware)
         settings_grid.addWidget(self.codec_combo, 4, 1)
 
         settings_grid.addWidget(QLabel("Encode Preset"), 5, 0)
@@ -252,12 +271,40 @@ class QueueVideoCompressorWindow(QMainWindow):
         self.subtitle_combo = QComboBox()
         self.subtitle_combo.addItem("Pass subtitles", "passthrough")
         self.subtitle_combo.addItem("Strip subtitles", "strip")
+        self.subtitle_combo.addItem("Burn selected file", "burn-in")
         advanced_audio_row.addWidget(self.subtitle_combo)
+        self.subtitle_track_check = QCheckBox("Track only")
+        advanced_audio_row.addWidget(self.subtitle_track_check)
+        self.subtitle_track_spin = QSpinBox()
+        self.subtitle_track_spin.setRange(0, 99)
+        self.subtitle_track_spin.setPrefix("#")
+        advanced_audio_row.addWidget(self.subtitle_track_spin)
+        self.subtitle_path_edit = QLineEdit()
+        self.subtitle_path_edit.setReadOnly(True)
+        self.subtitle_path_edit.setPlaceholderText("No burn-in file")
+        advanced_audio_row.addWidget(self.subtitle_path_edit, 1)
+        subtitle_btn = QPushButton("Choose")
+        subtitle_btn.setObjectName("secondaryBtn")
+        subtitle_btn.clicked.connect(self.choose_subtitle_file)
+        advanced_audio_row.addWidget(subtitle_btn)
         self.downmix_check = QCheckBox("Downmix stereo")
         advanced_audio_row.addWidget(self.downmix_check)
         self.loudness_check = QCheckBox("EBU R128 normalize")
         advanced_audio_row.addWidget(self.loudness_check)
         settings_grid.addLayout(advanced_audio_row, 10, 1)
+
+        settings_grid.addWidget(QLabel("AV1 / VBR"), 11, 0)
+        quality_row = QHBoxLayout()
+        self.constrained_vbr_check = QCheckBox("Constrained VBR")
+        quality_row.addWidget(self.constrained_vbr_check)
+        quality_row.addWidget(QLabel("Max kbps"))
+        self.max_bitrate_spin = QSpinBox()
+        self.max_bitrate_spin.setRange(50, 500000)
+        self.max_bitrate_spin.setValue(4000)
+        quality_row.addWidget(self.max_bitrate_spin)
+        self.scene_crf_check = QCheckBox("Scene-aware CRF")
+        quality_row.addWidget(self.scene_crf_check)
+        settings_grid.addLayout(quality_row, 11, 1)
         main_layout.addWidget(settings_group)
 
         progress_group = QGroupBox("Progress")
@@ -357,8 +404,13 @@ class QueueVideoCompressorWindow(QMainWindow):
             "crop_mode": self.crop_combo.currentData(),
             "hdr_mode": self.hdr_combo.currentData(),
             "subtitle_mode": self.subtitle_combo.currentData(),
+            "subtitle_path": self.subtitle_path_edit.text() or None,
+            "subtitle_track": self.subtitle_track_spin.value() if self.subtitle_track_check.isChecked() else None,
             "audio_downmix": self.downmix_check.isChecked(),
             "loudness_normalize": self.loudness_check.isChecked(),
+            "constrained_vbr": self.constrained_vbr_check.isChecked(),
+            "max_bitrate_kbps": self.max_bitrate_spin.value() if self.constrained_vbr_check.isChecked() else None,
+            "scene_crf": self.scene_crf_check.isChecked(),
         }
 
     @staticmethod
@@ -453,6 +505,17 @@ class QueueVideoCompressorWindow(QMainWindow):
         self.refresh_queue()
         self.status_label.setText(f"{len(paths)} file(s) ready")
 
+    def choose_subtitle_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Subtitle File",
+            "",
+            "Subtitles (*.srt *.ass *.ssa *.vtt);;All Files (*)",
+        )
+        if path:
+            self.subtitle_path_edit.setText(path)
+            self._set_combo_data(self.subtitle_combo, "burn-in")
+
     def on_queue_selected(self, item, _previous=None):
         if item is None:
             return
@@ -489,10 +552,22 @@ class QueueVideoCompressorWindow(QMainWindow):
                 self._set_combo_data(self.hdr_combo, value)
             elif name == "subtitle_mode":
                 self._set_combo_data(self.subtitle_combo, value)
+            elif name == "subtitle_path":
+                self.subtitle_path_edit.setText(str(value or ""))
+            elif name == "subtitle_track":
+                self.subtitle_track_check.setChecked(value is not None)
+                if value is not None:
+                    self.subtitle_track_spin.setValue(int(value))
             elif name == "audio_downmix":
                 self.downmix_check.setChecked(bool(value))
             elif name == "loudness_normalize":
                 self.loudness_check.setChecked(bool(value))
+            elif name == "constrained_vbr":
+                self.constrained_vbr_check.setChecked(bool(value))
+            elif name == "max_bitrate_kbps" and value is not None:
+                self.max_bitrate_spin.setValue(int(value))
+            elif name == "scene_crf":
+                self.scene_crf_check.setChecked(bool(value))
         self.update_mode_controls()
 
     def remove_selected(self):
@@ -585,8 +660,13 @@ class QueueVideoCompressorWindow(QMainWindow):
             crop_mode=settings.crop_mode,
             hdr_mode=settings.hdr_mode,
             subtitle_mode=settings.subtitle_mode,
+            subtitle_path=str(settings.subtitle_path) if settings.subtitle_path else None,
+            subtitle_track=settings.subtitle_track,
             audio_downmix=settings.audio_downmix,
             loudness_normalize=settings.loudness_normalize,
+            constrained_vbr=settings.constrained_vbr,
+            max_bitrate_kbps=settings.max_bitrate_kbps,
+            scene_crf=settings.scene_crf,
         )
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.log.connect(self.append_job_log)

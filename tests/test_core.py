@@ -74,11 +74,58 @@ class CoreTests(unittest.TestCase):
             command = build_ffmpeg_commands(settings)[0]
             self.assertIn("-crf", command)
             self.assertIn("28", command)
-            self.assertIn("scale=-2:720", command[command.index("-vf") + 1])
+            self.assertIn("scale=-2:min(720,ih)", command[command.index("-vf") + 1])
             self.assertIn("tonemap", command[command.index("-vf") + 1])
             self.assertIn("subtitles=", command[command.index("-vf") + 1])
             self.assertIn("-ac", command)
             self.assertTrue(any("loudnorm" in item for item in command))
+
+    def test_hardware_and_scene_aware_quality_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            settings = CompressionSettings(
+                source,
+                root / "out.mp4",
+                video_codec="libsvtav1",
+                mode="quality",
+                crf=32,
+                constrained_vbr=True,
+                max_bitrate_kbps=1800,
+                scene_crf=True,
+            )
+            command = build_ffmpeg_commands(settings)[0]
+            self.assertIn("-maxrate", command)
+            self.assertIn("1800k", command)
+            self.assertIn("-svtav1-params", command)
+            self.assertIn("scd=1", command)
+
+    def test_subtitle_track_is_mapped_and_burned_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mkv"
+            source.write_bytes(b"source")
+            subtitle = root / "captions.srt"
+            subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+            passthrough = CompressionSettings(
+                source,
+                root / "out.mkv",
+                mode="quality",
+                subtitle_track=2,
+            )
+            passthrough_command = build_ffmpeg_commands(passthrough)[0]
+            self.assertIn("0:s:2?", passthrough_command)
+            burn_in = CompressionSettings(
+                source,
+                root / "burned.mkv",
+                mode="quality",
+                subtitle_mode="burn-in",
+                subtitle_path=subtitle,
+                subtitle_track=2,
+            )
+            burn_command = build_ffmpeg_commands(burn_in)[0]
+            self.assertIn(":si=2", burn_command[burn_command.index("-vf") + 1])
 
     def test_invalid_burn_in_settings_fail_early(self):
         with tempfile.TemporaryDirectory() as directory:

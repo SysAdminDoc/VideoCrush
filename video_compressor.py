@@ -226,7 +226,9 @@ class CompressionWorker(QThread):
     def __init__(self, input_path, output_path, target_mb, video_codec, audio_codec,
                  preset, resolution, audio_bitrate, parent=None, mode="target-size",
                  crf=23.0, two_pass=True, crop_mode="none", hdr_mode="passthrough",
-                 subtitle_mode="passthrough", audio_downmix=False, loudness_normalize=False):
+                 subtitle_mode="passthrough", subtitle_path=None, subtitle_track=None,
+                 audio_downmix=False, loudness_normalize=False, constrained_vbr=False,
+                 max_bitrate_kbps=None, scene_crf=False):
         super().__init__(parent)
         self.input_path = input_path
         self.output_path = output_path
@@ -242,8 +244,13 @@ class CompressionWorker(QThread):
         self.crop_mode = crop_mode
         self.hdr_mode = hdr_mode
         self.subtitle_mode = subtitle_mode
+        self.subtitle_path = subtitle_path
+        self.subtitle_track = subtitle_track
         self.audio_downmix = audio_downmix
         self.loudness_normalize = loudness_normalize
+        self.constrained_vbr = constrained_vbr
+        self.max_bitrate_kbps = max_bitrate_kbps
+        self.scene_crf = scene_crf
         self._cancelled = False
         self._cancel_event = threading.Event()
         self._pause_event = threading.Event()
@@ -478,8 +485,13 @@ class CompressionWorker(QThread):
             crop_mode=self.crop_mode,
             hdr_mode=self.hdr_mode,
             subtitle_mode=self.subtitle_mode,
+            subtitle_path=Path(self.subtitle_path) if self.subtitle_path else None,
+            subtitle_track=self.subtitle_track,
             audio_downmix=self.audio_downmix,
             loudness_normalize=self.loudness_normalize,
+            constrained_vbr=self.constrained_vbr,
+            max_bitrate_kbps=self.max_bitrate_kbps,
+            scene_crf=self.scene_crf,
         )
         try:
             result = run_compression(

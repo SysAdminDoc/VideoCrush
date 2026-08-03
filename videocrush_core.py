@@ -46,6 +46,8 @@ ENCODERS = {
     "H.265 (libx265)": "libx265",
     "VP9": "libvpx-vp9",
     "AV1 (SVT)": "libsvtav1",
+    "AV1 (libaom)": "libaom-av1",
+    "FFV1 (lossless)": "ffv1",
     "H.264 (NVENC)": "h264_nvenc",
     "H.265 (NVENC)": "hevc_nvenc",
     "AV1 (NVENC)": "av1_nvenc",
@@ -83,6 +85,7 @@ class PresetProfile:
     audio_bitrate: int = 128
     output_format: str = "mp4"
     two_pass: bool = True
+    extra_video_args: Tuple[str, ...] = ()
 
 
 PRESET_PROFILES: Dict[str, PresetProfile] = {
@@ -97,6 +100,49 @@ PRESET_PROFILES: Dict[str, PresetProfile] = {
         "H.264 web video capped at 720p.",
         resolution="720p",
         crf=24,
+    ),
+    "web-1080p-nvenc": PresetProfile(
+        "web-1080p-nvenc",
+        "NVIDIA NVENC H.264 web output capped at 1080p.",
+        video_codec="h264_nvenc",
+        resolution="1080p",
+        crf=23,
+    ),
+    "web-1080p-qsv": PresetProfile(
+        "web-1080p-qsv",
+        "Intel Quick Sync H.264 web output capped at 1080p.",
+        video_codec="h264_qsv",
+        resolution="1080p",
+        crf=23,
+    ),
+    "youtube-1080p": PresetProfile(
+        "youtube-1080p",
+        "YouTube-ready MP4 with a 1080p ceiling.",
+        resolution="1080p",
+        crf=21,
+        audio_bitrate=192,
+    ),
+    "x-1080p": PresetProfile(
+        "x-1080p",
+        "X upload profile with a 1080p ceiling and efficient audio.",
+        resolution="1080p",
+        crf=23,
+        audio_bitrate=128,
+    ),
+    "discord-nitro": PresetProfile(
+        "discord-nitro",
+        "Discord Nitro size-target profile.",
+        mode="target-size",
+        target_mb=500,
+        resolution="1080p",
+    ),
+    "discord-free": PresetProfile(
+        "discord-free",
+        "Small Discord upload profile.",
+        mode="target-size",
+        target_mb=25,
+        resolution="720p",
+        audio_bitrate=96,
     ),
     "email-10mb": PresetProfile(
         "email-10mb",
@@ -127,6 +173,7 @@ PRESET_PROFILES: Dict[str, PresetProfile] = {
         crf=23,
         audio_codec="aac",
         audio_bitrate=128,
+        extra_video_args=("-profile:v", "baseline", "-level", "3.0"),
     ),
     "lossless": PresetProfile(
         "lossless",
@@ -161,8 +208,12 @@ class CompressionSettings:
     hdr_mode: str = "passthrough"
     subtitle_mode: str = "passthrough"
     subtitle_path: Optional[Path] = None
+    subtitle_track: Optional[int] = None
     audio_downmix: bool = False
     loudness_normalize: bool = False
+    constrained_vbr: bool = False
+    max_bitrate_kbps: Optional[int] = None
+    scene_crf: bool = False
     output_format: Optional[str] = None
     extra_video_args: List[str] = field(default_factory=list)
 
@@ -182,14 +233,19 @@ class CompressionSettings:
             raise VideoCrushError("Subtitle mode must be passthrough, strip, or burn-in.")
         if self.subtitle_mode == "burn-in" and not self.subtitle_path:
             raise VideoCrushError("Burn-in subtitle mode requires a subtitle file.")
+        if self.subtitle_track is not None and self.subtitle_track < 0:
+            raise VideoCrushError("Subtitle track must be zero or greater.")
         if self.hdr_mode not in {"passthrough", "tone-map-sdr"}:
             raise VideoCrushError("HDR mode must be passthrough or tone-map-sdr.")
         if self.crop_mode not in {"none", "auto", "manual"}:
             raise VideoCrushError("Crop mode must be none, auto, or manual.")
+        if self.max_bitrate_kbps is not None and self.max_bitrate_kbps <= 0:
+            raise VideoCrushError("Maximum bitrate must be positive.")
         return replace(
             self,
             input_path=Path(self.input_path),
             output_path=Path(self.output_path),
+            subtitle_path=Path(self.subtitle_path) if self.subtitle_path else None,
             mode=mode,
         )
 
@@ -388,7 +444,7 @@ def _filter_chain(settings: CompressionSettings) -> Optional[str]:
             height = int(str(settings.resolution).lower().replace("p", ""))
         except ValueError as exc:
             raise VideoCrushError(f"Invalid resolution: {settings.resolution}") from exc
-        filters.append(f"scale=-2:{height}")
+        filters.append(f"scale=-2:min({height},ih)")
     if settings.hdr_mode == "tone-map-sdr":
         filters.append(
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
@@ -397,7 +453,10 @@ def _filter_chain(settings: CompressionSettings) -> Optional[str]:
     if settings.subtitle_mode == "burn-in":
         if not settings.subtitle_path:
             raise VideoCrushError("Burn-in subtitle mode requires a subtitle file.")
-        filters.append(f"subtitles='{_escape_subtitle_path(settings.subtitle_path)}'")
+        subtitle_filter = f"subtitles='{_escape_subtitle_path(settings.subtitle_path)}'"
+        if settings.subtitle_track is not None:
+            subtitle_filter += f":si={settings.subtitle_track}"
+        filters.append(subtitle_filter)
     return ",".join(filters) if filters else None
 
 
@@ -419,13 +478,26 @@ def _encoder_quality_args(codec: str, crf: float) -> List[str]:
 
 def _codec_args(settings: CompressionSettings, video_kbps: Optional[int]) -> List[str]:
     args = ["-c:v", settings.video_codec]
-    if settings.mode == "target-size":
+    if settings.video_codec == "ffv1":
+        pass
+    elif settings.mode == "target-size":
         if video_kbps is None:
             raise VideoCrushError("A target-size encode requires a calculated video bitrate.")
         args += ["-b:v", f"{video_kbps}k"]
     else:
         args += _encoder_quality_args(settings.video_codec, settings.crf)
-    if settings.encode_preset and not settings.video_codec.endswith("_videotoolbox"):
+    if settings.constrained_vbr:
+        max_bitrate = settings.max_bitrate_kbps or video_kbps
+        if max_bitrate:
+            if settings.video_codec == "libaom-av1":
+                args += ["-b:v", "0"]
+            args += ["-maxrate", f"{max_bitrate}k", "-bufsize", f"{max_bitrate * 2}k"]
+    if settings.scene_crf:
+        if settings.video_codec == "libsvtav1":
+            args += ["-svtav1-params", "scd=1"]
+        elif settings.video_codec == "libaom-av1":
+            args += ["-aom-params", "enable-tpl-model=1:deltaq-mode=2"]
+    if settings.encode_preset and settings.video_codec != "ffv1" and not settings.video_codec.endswith("_videotoolbox"):
         args += ["-preset", settings.encode_preset]
     args += list(settings.extra_video_args)
     return args
@@ -448,13 +520,18 @@ def _audio_args(settings: CompressionSettings, include_audio: bool = True) -> Li
     return args
 
 
-def _map_args(settings: CompressionSettings, include_audio: bool = True) -> List[str]:
+def _map_args(
+    settings: CompressionSettings,
+    include_audio: bool = True,
+    include_subtitles: bool = True,
+) -> List[str]:
     args = ["-map", "0:v:0"]
     if include_audio and settings.audio_codec != "an":
         args += ["-map", "0:a:0?"]
-    if settings.subtitle_mode == "passthrough":
-        args += ["-map", "0:s?"]
-    elif settings.subtitle_mode == "strip":
+    if include_subtitles and settings.subtitle_mode == "passthrough":
+        subtitle_map = "0:s?" if settings.subtitle_track is None else f"0:s:{settings.subtitle_track}?"
+        args += ["-map", subtitle_map]
+    elif include_subtitles and settings.subtitle_mode == "strip":
         args += ["-sn"]
     return args
 
@@ -491,7 +568,7 @@ def build_ffmpeg_commands(
     use_two_pass = normalized.mode == "target-size" and normalized.two_pass
 
     if use_two_pass:
-        pass_one = list(common) + _map_args(normalized, include_audio=False)
+        pass_one = list(common) + _map_args(normalized, include_audio=False, include_subtitles=False)
         if filters:
             pass_one += ["-vf", filters]
         pass_one += _codec_args(normalized, video_kbps)
@@ -589,7 +666,46 @@ def hardware_accelerators(ffmpeg: Optional[str] = None) -> List[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip() and not line.startswith("Hardware")]
 
 
-def choose_hardware_encoder(available: Optional[Dict[str, str]] = None) -> Optional[str]:
+def can_encode_hardware(codec: str, ffmpeg: Optional[str] = None) -> bool:
+    """Verify that a hardware encoder can initialize on this machine."""
+
+    binary = ffmpeg or find_ffmpeg()
+    if not binary:
+        return False
+    command = [
+        binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=size=16x16:rate=1",
+        "-frames:v",
+        "1",
+        "-c:v",
+        codec,
+        "-f",
+        "null",
+        _null_output(),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            creationflags=_creation_flags(),
+            timeout=15,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def choose_hardware_encoder(
+    available: Optional[Dict[str, str]] = None,
+    verify: bool = True,
+) -> Optional[str]:
     available = available or supported_encoders()
     system = platform.system()
     preference: List[str]
@@ -605,7 +721,7 @@ def choose_hardware_encoder(available: Optional[Dict[str, str]] = None) -> Optio
             "H.265 (AMF)",
         ]
     for label in preference:
-        if label in available:
+        if label in available and (not verify or can_encode_hardware(available[label])):
             return available[label]
     return None
 
@@ -856,6 +972,7 @@ def settings_from_profile(
         "crf": profile.crf,
         "two_pass": profile.two_pass,
         "output_format": profile.output_format,
+        "extra_video_args": list(profile.extra_video_args),
     }
     values.update(overrides)
     return CompressionSettings(**values)

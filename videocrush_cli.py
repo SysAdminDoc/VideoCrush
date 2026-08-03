@@ -44,9 +44,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-two-pass", action="store_true", help="Disable two-pass target-size encoding.")
     parser.add_argument("--crop", choices=("none", "auto"), default="none", help="Detect and remove letterboxing.")
     parser.add_argument("--hdr", choices=("passthrough", "tone-map-sdr"), default="passthrough")
-    parser.add_argument("--subtitles", choices=("passthrough", "strip"), default="passthrough")
+    parser.add_argument("--subtitles", choices=("passthrough", "strip", "burn-in"), default="passthrough")
+    parser.add_argument("--subtitle-file", help="Subtitle file for --subtitles burn-in.")
+    parser.add_argument("--subtitle-track", type=int, help="Use only this zero-based subtitle track.")
     parser.add_argument("--downmix", action="store_true", help="Downmix audio to stereo.")
     parser.add_argument("--loudness-normalize", action="store_true", help="Apply EBU R128 loudness normalization.")
+    parser.add_argument("--constrained-vbr", action="store_true", help="Apply maxrate/bufsize around quality encoding.")
+    parser.add_argument("--max-bitrate", type=int, help="Constrained-VBR maximum video bitrate in kbps.")
+    parser.add_argument("--scene-crf", action="store_true", help="Enable AV1 scene-change and delta-Q tuning.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running FFmpeg.")
     parser.add_argument("--export-script", help="Write the generated command(s) to a .bat or .sh file.")
     parser.add_argument("--json", action="store_true", help="Emit one machine-readable result object per input.")
@@ -75,8 +80,13 @@ def _overrides(args: argparse.Namespace) -> dict:
             "crop_mode": args.crop,
             "hdr_mode": args.hdr,
             "subtitle_mode": args.subtitles,
+            "subtitle_path": args.subtitle_file,
+            "subtitle_track": args.subtitle_track,
             "audio_downmix": args.downmix,
             "loudness_normalize": args.loudness_normalize,
+            "constrained_vbr": args.constrained_vbr,
+            "max_bitrate_kbps": args.max_bitrate,
+            "scene_crf": args.scene_crf,
         }
     )
     return values

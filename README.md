@@ -6,6 +6,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Language](https://img.shields.io/badge/language-Python-3776AB)
 ![Type](https://img.shields.io/badge/type-Desktop%20App-brightgreen)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 
 Python GUI video compressor with preset profiles, batch processing, and FFmpeg-powered encoding for optimal file size reduction.
 

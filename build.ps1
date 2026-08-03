@@ -2,6 +2,10 @@
 param()
 
 $ErrorActionPreference = "Stop"
+$buildStarted = Get-Date
+$privateConfig = Join-Path ([System.IO.Path]::GetTempPath()) "VideoCrush-pyinstaller-config"
+New-Item -ItemType Directory -Force -Path $privateConfig | Out-Null
+$env:PYINSTALLER_CONFIG_DIR = $privateConfig
 
 function Resolve-Tool([string]$Name) {
     $command = Get-Command "$Name.exe" -ErrorAction SilentlyContinue
@@ -53,11 +57,17 @@ foreach ($dll in Get-ChildItem -LiteralPath $ffmpegBin -Filter "*.dll" -File -Er
 
 $pyinstallerArguments = @(
     "--noconfirm", "--clean", "--onefile", "--windowed", "--name", "VideoCrush",
+    "--workpath", "build\VideoCrush-bundled", "--distpath", "dist", "--specpath", "build",
     "video_compressor.py"
 )
 $pyinstallerArguments += $binaryArguments
 & pyinstaller @pyinstallerArguments
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+$pyinstallerExitCode = $LASTEXITCODE
+if ($pyinstallerExitCode -ne 0) {
+    throw "PyInstaller failed with exit code $pyinstallerExitCode."
 }
-Write-Host "Built bundled-FFmpeg artifact: $(Resolve-Path dist\VideoCrush.exe)"
+$artifact = Get-Item -LiteralPath dist\VideoCrush.exe -ErrorAction SilentlyContinue
+if (-not $artifact -or $artifact.LastWriteTime -lt $buildStarted) {
+    throw "PyInstaller did not produce a fresh dist\VideoCrush.exe artifact."
+}
+Write-Host "Built bundled-FFmpeg artifact: $($artifact.FullName)"

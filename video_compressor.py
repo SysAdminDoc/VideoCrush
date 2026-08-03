@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VideoCrush v0.1.0 — Professional Video Compressor
+VideoCrush v0.2.0 — Professional Video Compressor
 Target-size video compression with 2-pass encoding via FFmpeg.
 """
 

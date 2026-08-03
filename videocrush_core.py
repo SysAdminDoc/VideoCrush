@@ -24,7 +24,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from videocrush_power import wait_for_ac_power
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 VIDEO_EXTENSIONS = frozenset(
     {

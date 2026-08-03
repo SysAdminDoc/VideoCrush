@@ -2,7 +2,7 @@
 
 All notable changes to VideoCrush will be documented in this file.
 
-## [Unreleased]
+## [v0.2.0] - 2026-08-03
 
 - Added a tested, dependency-free FFmpeg core shared by the desktop app and CLI.
 - Added target-size and quality encoding modes, advanced crop/HDR/subtitle/audio filters, and deterministic command-script export.

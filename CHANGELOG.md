@@ -11,6 +11,7 @@ All notable changes to VideoCrush will be documented in this file.
 - Fixed frozen-build bootstrap recursion and verified the packaged queue window on the isolated virtual display.
 - Added verified hardware-encoder discovery/default selection, platform-oriented profiles, no-upscale resolution caps, per-track subtitle burn-in/pass/strip, HDR tone mapping, loudness/downmix controls, and AV1 constrained-VBR scene tuning.
 - Added versioned preset JSON exchange, watch-folder extension routing, explicit Task Scheduler/context-menu helpers, and opt-in post-queue sleep/shutdown actions.
+- Added persisted quality reports with before/after thumbnail strips, SSIM/VMAF metrics, file-size deltas, palette-optimized GIF creation, scene detection, optional URL/Whisper/upscaler adapters, image-sibling optimization, and battery-aware encoding.
 
 ## [v0.1.0] - %Y->- (HEAD -> main, origin/main, origin/HEAD)
 

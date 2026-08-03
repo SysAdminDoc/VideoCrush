@@ -315,6 +315,9 @@ class QueueVideoCompressorWindow(QMainWindow):
         self.scene_crf_check = QCheckBox("Scene-aware CRF")
         quality_row.addWidget(self.scene_crf_check)
         settings_grid.addLayout(quality_row, 11, 1)
+        settings_grid.addWidget(QLabel("Power"), 12, 0)
+        self.battery_check = QCheckBox("Pause on battery; resume on AC")
+        settings_grid.addWidget(self.battery_check, 12, 1)
         main_layout.addWidget(settings_group)
 
         progress_group = QGroupBox("Progress")
@@ -427,6 +430,7 @@ class QueueVideoCompressorWindow(QMainWindow):
             "constrained_vbr": self.constrained_vbr_check.isChecked(),
             "max_bitrate_kbps": self.max_bitrate_spin.value() if self.constrained_vbr_check.isChecked() else None,
             "scene_crf": self.scene_crf_check.isChecked(),
+            "pause_on_battery": self.battery_check.isChecked(),
         }
 
     @staticmethod
@@ -610,6 +614,8 @@ class QueueVideoCompressorWindow(QMainWindow):
                 self.max_bitrate_spin.setValue(int(value))
             elif name == "scene_crf":
                 self.scene_crf_check.setChecked(bool(value))
+            elif name == "pause_on_battery":
+                self.battery_check.setChecked(bool(value))
         self.update_mode_controls()
 
     def remove_selected(self):
@@ -721,6 +727,7 @@ class QueueVideoCompressorWindow(QMainWindow):
             constrained_vbr=settings.constrained_vbr,
             max_bitrate_kbps=settings.max_bitrate_kbps,
             scene_crf=settings.scene_crf,
+            pause_on_battery=settings.pause_on_battery,
         )
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.log.connect(self.append_job_log)

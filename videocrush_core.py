@@ -20,6 +20,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from videocrush_power import wait_for_ac_power
+
 
 VERSION = "0.1.0"
 
@@ -214,6 +216,7 @@ class CompressionSettings:
     constrained_vbr: bool = False
     max_bitrate_kbps: Optional[int] = None
     scene_crf: bool = False
+    pause_on_battery: bool = False
     output_format: Optional[str] = None
     extra_video_args: List[str] = field(default_factory=list)
 
@@ -444,7 +447,9 @@ def _filter_chain(settings: CompressionSettings) -> Optional[str]:
             height = int(str(settings.resolution).lower().replace("p", ""))
         except ValueError as exc:
             raise VideoCrushError(f"Invalid resolution: {settings.resolution}") from exc
-        filters.append(f"scale=-2:min({height},ih)")
+        # Escape the expression comma for FFmpeg's filtergraph parser. Without
+        # it, the comma is interpreted as a filter separator on real encodes.
+        filters.append(f"scale=-2:min({height}\\,ih)")
     if settings.hdr_mode == "tone-map-sdr":
         filters.append(
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
@@ -913,6 +918,13 @@ def run_compression(
             log_callback(f"{label}: {command_to_text(command, 'cmd' if os.name == 'nt' else 'sh')}")
     try:
         for index, command in enumerate(commands):
+            if normalized.pause_on_battery:
+                wait_for_ac_power(
+                    cancel_event=cancel_event,
+                    status_callback=lambda status: status_callback("Waiting for AC power...")
+                    if status_callback and status.has_battery and not status.on_ac_power
+                    else None,
+                )
             if status_callback:
                 status_callback("Pass 1/2 — Analyzing..." if len(commands) == 2 and index == 0 else "Encoding...")
             offset = int(index * 100 / len(commands))

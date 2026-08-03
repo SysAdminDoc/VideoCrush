@@ -228,7 +228,7 @@ class CompressionWorker(QThread):
                  crf=23.0, two_pass=True, crop_mode="none", hdr_mode="passthrough",
                  subtitle_mode="passthrough", subtitle_path=None, subtitle_track=None,
                  audio_downmix=False, loudness_normalize=False, constrained_vbr=False,
-                 max_bitrate_kbps=None, scene_crf=False):
+                 max_bitrate_kbps=None, scene_crf=False, pause_on_battery=False):
         super().__init__(parent)
         self.input_path = input_path
         self.output_path = output_path
@@ -251,6 +251,7 @@ class CompressionWorker(QThread):
         self.constrained_vbr = constrained_vbr
         self.max_bitrate_kbps = max_bitrate_kbps
         self.scene_crf = scene_crf
+        self.pause_on_battery = pause_on_battery
         self._cancelled = False
         self._cancel_event = threading.Event()
         self._pause_event = threading.Event()
@@ -492,6 +493,7 @@ class CompressionWorker(QThread):
             constrained_vbr=self.constrained_vbr,
             max_bitrate_kbps=self.max_bitrate_kbps,
             scene_crf=self.scene_crf,
+            pause_on_battery=self.pause_on_battery,
         )
         try:
             result = run_compression(

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -66,6 +67,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--constrained-vbr", action="store_true", help="Apply maxrate/bufsize around quality encoding.")
     parser.add_argument("--max-bitrate", type=int, help="Constrained-VBR maximum video bitrate in kbps.")
     parser.add_argument("--scene-crf", action="store_true", help="Enable AV1 scene-change and delta-Q tuning.")
+    parser.add_argument("--pause-on-battery", action="store_true", help="Wait for AC power between encode passes/jobs.")
+    parser.add_argument("--quality-report", action="store_true", help="Write SSIM/VMAF/size-delta JSON and thumbnail paths.")
+    parser.add_argument("--gif-output", help="Create an optimized palette GIF from --input and exit.")
+    parser.add_argument("--gif-fps", type=int, default=12)
+    parser.add_argument("--gif-width", type=int, default=480)
+    parser.add_argument("--url", help="Download a YouTube/M3U8 URL with yt-dlp before encoding.")
+    parser.add_argument("--auto-subtitles", action="store_true", help="Generate SRT subtitles with Whisper and burn them in.")
+    parser.add_argument("--whisper-model", default="small")
+    parser.add_argument("--scene-detect", action="store_true", help="Emit FFmpeg scene-change timestamps before encoding.")
+    parser.add_argument("--upscale-engine", choices=("realesrgan", "video2x"), help="Run an optional AI upscaler pre-pass.")
+    parser.add_argument("--upscale-scale", type=int, default=2)
+    parser.add_argument("--optimize-images", action="store_true", help="Run available pngquant/jpegoptim/gifsicle sibling optimizers.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running FFmpeg.")
     parser.add_argument("--export-script", help="Write the generated command(s) to a .bat or .sh file.")
     parser.add_argument("--export-presets", help="Export built-in or imported profiles to JSON.")
@@ -112,6 +125,7 @@ def _overrides(args: argparse.Namespace) -> dict:
             "constrained_vbr": args.constrained_vbr,
             "max_bitrate_kbps": args.max_bitrate,
             "scene_crf": args.scene_crf,
+            "pause_on_battery": args.pause_on_battery,
         }
     )
     return values
@@ -132,14 +146,34 @@ def _process_item(
     profiles: Dict[str, object],
     multiple: bool,
 ) -> bool:
-    output_path = output_path_for(
-        item,
-        output,
-        output_format=profiles[preset].output_format,
-        multiple=multiple,
-    )
-    settings = settings_from_profile(preset, item, output_path, profiles=profiles, **_overrides(args))
+    source_item = item
+    temporary = None
     try:
+        if args.upscale_engine:
+            from videocrush_media import upscale_video
+
+            temporary = tempfile.TemporaryDirectory(prefix="videocrush-upscale-")
+            item = Path(temporary.name) / source_item.name
+            upscale_video(source_item, item, engine=args.upscale_engine, scale=args.upscale_scale)
+        if args.scene_detect:
+            from videocrush_media import detect_scene_times
+
+            scenes = detect_scene_times(item)
+            _emit(args, {"ok": True, "input": str(source_item), "scene_times": scenes, "message": f"Detected {len(scenes)} scene change(s)."})
+        overrides = _overrides(args)
+        if args.auto_subtitles:
+            from videocrush_media import transcribe_subtitles
+
+            subtitle_dir = output / ".videocrush-subtitles"
+            subtitle_path = transcribe_subtitles(item, subtitle_dir, model=args.whisper_model)
+            overrides.update({"subtitle_mode": "burn-in", "subtitle_path": str(subtitle_path)})
+        output_path = output_path_for(
+            source_item,
+            output,
+            output_format=profiles[preset].output_format,
+            multiple=multiple,
+        )
+        settings = settings_from_profile(preset, item, output_path, profiles=profiles, **overrides)
         if args.dry_run or args.export_script:
             from videocrush_core import build_ffmpeg_commands, find_ffmpeg, probe_video
 
@@ -183,10 +217,43 @@ def _process_item(
                 "message": f"{result.input_path.name} -> {result.output_path} ({format_size(result.output_size)}, saved {result.saved_percent:.1f}%)",
             },
         )
+        if args.quality_report:
+            from videocrush_media import compare_quality, create_thumbnail_strip
+
+            thumbnail_root = result.output_path.parent / f".{result.output_path.stem}-thumbnails"
+            before = create_thumbnail_strip(source_item, thumbnail_root / "before")
+            after = create_thumbnail_strip(result.output_path, thumbnail_root / "after")
+            report = compare_quality(source_item, result.output_path, thumbnails=before + after)
+            report_path = result.output_path.with_name(result.output_path.name + ".quality.json")
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "reference": str(report.reference),
+                        "candidate": str(report.candidate),
+                        "reference_size": report.reference_size,
+                        "candidate_size": report.candidate_size,
+                        "size_delta_percent": round(report.size_delta_percent, 2),
+                        "ssim": report.ssim,
+                        "vmaf": report.vmaf,
+                        "thumbnails": [str(path) for path in report.thumbnails],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            _emit(args, {"ok": True, "quality_report": str(report_path), "message": f"Wrote quality report: {report_path}"})
+        if args.optimize_images:
+            from videocrush_media import image_siblings, optimize_images
+
+            commands = optimize_images(image_siblings(source_item))
+            _emit(args, {"ok": True, "optimized_images": len(commands), "message": f"Optimized {len(commands)} image sibling(s)."})
         return True
     except (VideoCrushError, OSError, ValueError) as exc:
         _emit(args, {"ok": False, "input": str(item), "error": str(exc), "message": f"{item.name}: {exc}"})
         return False
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -209,6 +276,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 0
         if (args.export_presets or args.import_presets) and not args.input and not args.watch and not args.schedule:
             return 0
+        if args.gif_output:
+            if not args.input:
+                _emit(args, {"ok": False, "error": "--gif-output requires --input."})
+                return 2
+            from videocrush_media import create_gif
+
+            gif_path = create_gif(Path(args.input).expanduser().resolve(), Path(args.gif_output).expanduser().resolve(), fps=args.gif_fps, width=args.gif_width)
+            _emit(args, {"ok": True, "output": str(gif_path), "message": f"Created GIF: {gif_path}"})
+            return 0
+        if args.url:
+            if not args.out:
+                _emit(args, {"ok": False, "error": "--url requires --out as a download/output folder."})
+                return 2
+            from videocrush_media import download_url
+
+            downloaded = download_url(args.url, Path(args.out).expanduser().resolve())
+            args.input = str(downloaded)
         if args.schedule:
             if not args.input or not args.out or not args.schedule_name:
                 _emit(args, {"ok": False, "error": "--schedule requires --schedule-name, --input, and --out."})

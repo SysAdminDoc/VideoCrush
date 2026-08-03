@@ -74,7 +74,7 @@ class CoreTests(unittest.TestCase):
             command = build_ffmpeg_commands(settings)[0]
             self.assertIn("-crf", command)
             self.assertIn("28", command)
-            self.assertIn("scale=-2:min(720,ih)", command[command.index("-vf") + 1])
+            self.assertIn("scale=-2:min(720\\,ih)", command[command.index("-vf") + 1])
             self.assertIn("tonemap", command[command.index("-vf") + 1])
             self.assertIn("subtitles=", command[command.index("-vf") + 1])
             self.assertIn("-ac", command)

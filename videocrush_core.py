@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -246,6 +247,34 @@ def find_ffprobe() -> Optional[str]:
 
 def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _suspend_process(process: subprocess.Popen) -> bool:
+    """Suspend a running FFmpeg process without creating a console window."""
+
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            status = ctypes.windll.ntdll.NtSuspendProcess(process._handle)
+            return status == 0
+        os.kill(process.pid, getattr(__import__("signal"), "SIGSTOP"))
+        return True
+    except (AttributeError, OSError, TypeError):
+        return False
+
+
+def _resume_process(process: subprocess.Popen) -> bool:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            status = ctypes.windll.ntdll.NtResumeProcess(process._handle)
+            return status == 0
+        os.kill(process.pid, getattr(__import__("signal"), "SIGCONT"))
+        return True
+    except (AttributeError, OSError, TypeError):
+        return False
 
 
 def probe_video(filepath: Path, ffprobe: Optional[str] = None) -> Optional[dict]:
@@ -643,6 +672,7 @@ def run_ffmpeg_command(
     progress_callback: Optional[Callable[[int], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    pause_event: Optional[threading.Event] = None,
     progress_offset: int = 0,
     progress_scale: int = 100,
 ) -> None:
@@ -660,13 +690,32 @@ def run_ffmpeg_command(
         raise VideoCrushError(f"Could not start FFmpeg: {exc}") from exc
 
     tail: List[str] = []
+    monitor_stop = threading.Event()
+
+    def monitor_process() -> None:
+        suspended = False
+        while not monitor_stop.is_set() and process.poll() is None:
+            if cancel_event and cancel_event.is_set():
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                break
+            should_pause = bool(pause_event and pause_event.is_set())
+            if should_pause and not suspended:
+                suspended = _suspend_process(process)
+            elif not should_pause and suspended:
+                _resume_process(process)
+                suspended = False
+            time.sleep(0.05)
+        if suspended:
+            _resume_process(process)
+
+    monitor_thread = threading.Thread(target=monitor_process, name="videocrush-process-monitor", daemon=True)
+    monitor_thread.start()
     try:
         assert process.stdout is not None
         for raw_line in iter(process.stdout.readline, b""):
-            if cancel_event and cancel_event.is_set():
-                process.terminate()
-                process.wait(timeout=10)
-                raise VideoCrushError("Compression cancelled.")
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -696,8 +745,12 @@ def run_ffmpeg_command(
         process.wait()
         raise VideoCrushError("FFmpeg did not stop after cancellation.")
     finally:
+        monitor_stop.set()
+        monitor_thread.join(timeout=1)
         if process.stdout:
             process.stdout.close()
+    if cancel_event and cancel_event.is_set():
+        raise VideoCrushError("Compression cancelled.")
     if return_code != 0:
         detail = "\n".join(tail[-5:])
         raise VideoCrushError(f"FFmpeg failed with exit code {return_code}.\n{detail}")
@@ -711,6 +764,7 @@ def run_compression(
     log_callback: Optional[Callable[[str], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    pause_event: Optional[threading.Event] = None,
     ffmpeg: Optional[str] = None,
     ffprobe: Optional[str] = None,
 ) -> CompressionResult:
@@ -753,6 +807,7 @@ def run_compression(
                 progress_callback=progress_callback,
                 log_callback=log_callback,
                 cancel_event=cancel_event,
+                pause_event=pause_event,
                 progress_offset=offset,
                 progress_scale=scale,
             )

@@ -42,10 +42,13 @@ def _bootstrap():
         print("Python 3.8+ required"); sys.exit(1)
     required = ['PyQt6']
     for pkg in required:
-        mod = pkg.split('[')[0].replace('-', '_').lower()
+        mod = pkg.split('[')[0].replace('-', '_')
         try:
             __import__(mod)
         except ImportError:
+            if getattr(sys, "frozen", False):
+                print(f"{pkg} is missing from this bundled build.", file=sys.stderr)
+                sys.exit(1)
             for flags in [[], ['--user'], ['--break-system-packages']]:
                 try:
                     subprocess.check_call(
@@ -218,9 +221,12 @@ class CompressionWorker(QThread):
     status = pyqtSignal(str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, input_path, output_path, target_mb, video_codec, audio_codec,
-                 preset, resolution, audio_bitrate, parent=None):
+                 preset, resolution, audio_bitrate, parent=None, mode="target-size",
+                 crf=23.0, two_pass=True, crop_mode="none", hdr_mode="passthrough",
+                 subtitle_mode="passthrough", audio_downmix=False, loudness_normalize=False):
         super().__init__(parent)
         self.input_path = input_path
         self.output_path = output_path
@@ -230,14 +236,29 @@ class CompressionWorker(QThread):
         self.preset = preset
         self.resolution = resolution
         self.audio_bitrate = audio_bitrate
+        self.mode = mode
+        self.crf = crf
+        self.two_pass = two_pass
+        self.crop_mode = crop_mode
+        self.hdr_mode = hdr_mode
+        self.subtitle_mode = subtitle_mode
+        self.audio_downmix = audio_downmix
+        self.loudness_normalize = loudness_normalize
         self._cancelled = False
         self._cancel_event = threading.Event()
+        self._pause_event = threading.Event()
 
     def cancel(self):
         self._cancelled = True
         self._cancel_event.set()
 
-    def run(self):
+    def pause(self):
+        self._pause_event.set()
+
+    def resume(self):
+        self._pause_event.clear()
+
+    def _legacy_run(self):
         try:
             ffmpeg = find_ffmpeg()
             if not ffmpeg:
@@ -450,9 +471,15 @@ class CompressionWorker(QThread):
             encode_preset=self.preset,
             resolution=self.resolution,
             audio_bitrate=self.audio_bitrate,
-            mode="target-size",
+            mode=self.mode,
             target_mb=self.target_mb,
-            two_pass=True,
+            crf=self.crf,
+            two_pass=self.two_pass,
+            crop_mode=self.crop_mode,
+            hdr_mode=self.hdr_mode,
+            subtitle_mode=self.subtitle_mode,
+            audio_downmix=self.audio_downmix,
+            loudness_normalize=self.loudness_normalize,
         )
         try:
             result = run_compression(
@@ -461,6 +488,7 @@ class CompressionWorker(QThread):
                 log_callback=self.log.emit,
                 status_callback=self.status.emit,
                 cancel_event=self._cancel_event,
+                pause_event=self._pause_event,
             )
             self.finished.emit({
                 'output': str(result.output_path),
@@ -470,6 +498,7 @@ class CompressionWorker(QThread):
         except VideoCrushError as exc:
             if self._cancelled:
                 self.status.emit("Cancelled")
+                self.cancelled.emit()
             else:
                 self.error.emit(str(exc))
         except Exception as exc:
@@ -511,14 +540,14 @@ class DropZone(QFrame):
     def dropEvent(self, event: QDropEvent):
         self.setStyleSheet("")
         urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
+        for url in urls:
+            path = url.toLocalFile()
             if Path(path).suffix.lower() in VIDEO_EXTENSIONS:
                 self.file_dropped.emit(path)
 
 
 # ── Main Window ────────────────────────────────────────────────────────────────
-class VideoCompressorWindow(QMainWindow):
+class LegacyVideoCompressorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"VideoCrush v{VERSION}")
@@ -841,6 +870,11 @@ class VideoCompressorWindow(QMainWindow):
                 subprocess.Popen(['xdg-open', folder])
 
 
+# ── Queue Window Entry Point ───────────────────────────────────────────────────
+from video_compressor_queue import QueueVideoCompressorWindow  # noqa: E402
+
+VideoCompressorWindow = QueueVideoCompressorWindow
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
@@ -866,6 +900,8 @@ def main():
 
     window.setWindowIcon(branding_icon)
     window.show()
+    if "--smoke" in sys.argv:
+        QTimer.singleShot(1500, app.quit)
     sys.exit(app.exec())
 
 if __name__ == '__main__':

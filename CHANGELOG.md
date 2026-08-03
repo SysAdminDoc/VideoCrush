@@ -7,6 +7,8 @@ All notable changes to VideoCrush will be documented in this file.
 - Added a tested, dependency-free FFmpeg core shared by the desktop app and CLI.
 - Added target-size and quality encoding modes, advanced crop/HDR/subtitle/audio filters, and deterministic command-script export.
 - Added the `videocrush` CLI with folder recursion, extension filtering, preset profiles, dry-run output, and JSON results.
+- Added a persisted queue window with drag/drop and folder intake, per-file overrides, priority/reorder/retry controls, pause/resume, and per-job logs.
+- Fixed frozen-build bootstrap recursion and verified the packaged queue window on the isolated virtual display.
 
 ## [v0.1.0] - %Y->- (HEAD -> main, origin/main, origin/HEAD)
 

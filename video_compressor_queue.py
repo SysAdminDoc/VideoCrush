@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -58,6 +58,25 @@ format_size = _app.format_size
 probe_video = _app.probe_video
 
 
+class HardwareProbe(QThread):
+    """Discover and verify hardware encoders without delaying the first window."""
+
+    completed = pyqtSignal(dict, object, list)
+
+    def __init__(self, ffmpeg_path, parent=None):
+        super().__init__(parent)
+        self.ffmpeg_path = ffmpeg_path
+
+    def run(self):
+        try:
+            available = supported_encoders(self.ffmpeg_path)
+            preferred = choose_hardware_encoder(available)
+            accelerators = hardware_accelerators(self.ffmpeg_path)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            available, preferred, accelerators = {}, None, []
+        self.completed.emit(available, preferred, accelerators)
+
+
 class QueueVideoCompressorWindow(QMainWindow):
     """Queue-first desktop workflow backed by the shared encoding core."""
 
@@ -96,21 +115,17 @@ class QueueVideoCompressorWindow(QMainWindow):
         title_block.addWidget(subtitle)
         header.addLayout(title_block)
         header.addStretch()
-        ffmpeg_available = bool(find_ffmpeg())
-        ffmpeg_status = QLabel("FFmpeg ready" if ffmpeg_available else "FFmpeg not found!")
-        available_encoders = supported_encoders() if ffmpeg_available else {}
-        preferred_hardware = choose_hardware_encoder(available_encoders)
-        accelerators = hardware_accelerators() if ffmpeg_available else []
-        if preferred_hardware:
-            ffmpeg_status.setText(f"FFmpeg ready · HW default: {preferred_hardware}")
-        elif accelerators:
-            ffmpeg_status.setText("FFmpeg ready · HW: " + ", ".join(accelerators[:2]))
-        ffmpeg_status.setStyleSheet(
+        ffmpeg_path = find_ffmpeg()
+        ffmpeg_available = bool(ffmpeg_path)
+        available_encoders = {}
+        preferred_hardware = None
+        self.ffmpeg_status = QLabel("FFmpeg ready" if ffmpeg_available else "FFmpeg not found!")
+        self.ffmpeg_status.setStyleSheet(
             "color: #a6e3a1; font-size: 12px; font-weight: bold;"
             if ffmpeg_available
             else "color: #f38ba8; font-size: 12px; font-weight: bold;"
         )
-        header.addWidget(ffmpeg_status)
+        header.addWidget(self.ffmpeg_status)
         main_layout.addLayout(header)
 
         input_group = QGroupBox("Input")
@@ -375,12 +390,30 @@ class QueueVideoCompressorWindow(QMainWindow):
         self.refresh_queue()
         self.apply_profile_defaults()
         self.update_mode_controls()
+        self._hardware_probe = None
+        if ffmpeg_path and "--smoke" not in sys.argv:
+            self._hardware_probe = HardwareProbe(ffmpeg_path, self)
+            self._hardware_probe.completed.connect(self._apply_hardware_probe)
+            self._hardware_probe.finished.connect(self._hardware_probe.deleteLater)
+            self._hardware_probe.start()
 
     @staticmethod
     def _version():
         from videocrush_core import VERSION
 
         return VERSION
+
+    def _apply_hardware_probe(self, available, preferred, accelerators):
+        existing = {self.codec_combo.itemData(index) for index in range(self.codec_combo.count())}
+        for label, codec in VIDEO_CODECS.items():
+            if codec in available.values() and codec not in existing:
+                self.codec_combo.addItem(label, codec)
+                existing.add(codec)
+        if preferred:
+            self._set_combo_data(self.codec_combo, preferred)
+            self.ffmpeg_status.setText(f"FFmpeg ready · HW default: {preferred}")
+        elif accelerators:
+            self.ffmpeg_status.setText("FFmpeg ready · HW: " + ", ".join(accelerators[:2]))
 
     def _save_queue(self):
         try:

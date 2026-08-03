@@ -10,6 +10,7 @@ All notable changes to VideoCrush will be documented in this file.
 - Added a persisted queue window with drag/drop and folder intake, per-file overrides, priority/reorder/retry controls, pause/resume, and per-job logs.
 - Fixed frozen-build bootstrap recursion and verified the packaged queue window on the isolated virtual display.
 - Added verified hardware-encoder discovery/default selection, platform-oriented profiles, no-upscale resolution caps, per-track subtitle burn-in/pass/strip, HDR tone mapping, loudness/downmix controls, and AV1 constrained-VBR scene tuning.
+- Added versioned preset JSON exchange, watch-folder extension routing, explicit Task Scheduler/context-menu helpers, and opt-in post-queue sleep/shutdown actions.
 
 ## [v0.1.0] - %Y->- (HEAD -> main, origin/main, origin/HEAD)
 

@@ -32,12 +32,21 @@ The same encoder is available without a GUI for automation:
 ```bash
 python videocrush_cli.py --input ./in --preset web-1080p --out ./out --recursive
 videocrush --input ./in --preset email-10mb --out ./out --recursive
+videocrush --watch ./in --watch-rule .mov=web-1080p --out ./out
+videocrush --export-presets ./videocrush-presets.json
 ```
 
 Use `--mode quality --crf 24` for quality-targeted output, `--dry-run` to
 inspect the generated FFmpeg invocation, and `--export-script commands.bat`
 to save a reproducible command script. The CLI accepts a file or folder and
 can emit JSON results with `--json`.
+
+Preset JSON files can be imported with `--import-presets`. The watch mode
+routes extensions to profiles and supports `--watch-once` for scheduled runs.
+On Windows, `--context-menu install` adds a current-user Explorer action and
+`--schedule-name ... --schedule DAILY` prints a Task Scheduler command; add
+`--register-schedule` to register it. `--after-queue sleep` or `shutdown` is
+always explicit and opt-in.
 
 ## Requirements
 

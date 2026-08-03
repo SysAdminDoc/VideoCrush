@@ -953,10 +953,12 @@ def settings_from_profile(
     profile_name: str,
     input_path: Path,
     output_path: Path,
+    profiles: Optional[Dict[str, PresetProfile]] = None,
     **overrides,
 ) -> CompressionSettings:
+    registry = profiles or PRESET_PROFILES
     try:
-        profile = PRESET_PROFILES[profile_name]
+        profile = registry[profile_name]
     except KeyError as exc:
         raise VideoCrushError(f"Unknown preset profile: {profile_name}") from exc
     values = {

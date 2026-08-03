@@ -40,6 +40,7 @@ from videocrush_core import (
     supported_encoders,
 )
 from videocrush_queue import JobQueue, QueueStore, default_queue_path
+from videocrush_automation import export_presets, import_presets, perform_power_action
 
 # video_compressor imports this module only after its legacy helpers and shared
 # CompressionWorker have been defined. When launched as a script those helpers
@@ -71,6 +72,7 @@ class QueueVideoCompressorWindow(QMainWindow):
         self._current_job_id = None
         self._stop_after_current = False
         self._log_visible = True
+        self.profiles = PRESET_PROFILES
         self.queue_store = QueueStore(default_queue_path())
         try:
             self.queue = self.queue_store.load()
@@ -185,10 +187,18 @@ class QueueVideoCompressorWindow(QMainWindow):
         settings_grid.setSpacing(8)
         settings_grid.addWidget(QLabel("Profile"), 0, 0)
         self.profile_combo = QComboBox()
-        for name in PRESET_PROFILES:
+        for name in self.profiles:
             self.profile_combo.addItem(name, name)
         self.profile_combo.currentIndexChanged.connect(self.apply_profile_defaults)
         settings_grid.addWidget(self.profile_combo, 0, 1)
+        export_btn = QPushButton("Export JSON")
+        export_btn.setObjectName("secondaryBtn")
+        export_btn.clicked.connect(self.export_preset_file)
+        settings_grid.addWidget(export_btn, 0, 2)
+        import_btn = QPushButton("Import JSON")
+        import_btn.setObjectName("secondaryBtn")
+        import_btn.clicked.connect(self.import_preset_file)
+        settings_grid.addWidget(import_btn, 0, 3)
 
         settings_grid.addWidget(QLabel("Mode"), 1, 0)
         self.mode_combo = QComboBox()
@@ -337,6 +347,12 @@ class QueueVideoCompressorWindow(QMainWindow):
         self.open_folder_btn.setVisible(False)
         self.open_folder_btn.clicked.connect(self.open_output_folder)
         control_row.addWidget(self.open_folder_btn)
+        control_row.addWidget(QLabel("After:"))
+        self.after_queue_combo = QComboBox()
+        self.after_queue_combo.addItem("Keep running", "none")
+        self.after_queue_combo.addItem("Sleep", "sleep")
+        self.after_queue_combo.addItem("Shut down", "shutdown")
+        control_row.addWidget(self.after_queue_combo)
         progress_layout.addLayout(control_row)
         main_layout.addWidget(progress_group)
 
@@ -422,7 +438,7 @@ class QueueVideoCompressorWindow(QMainWindow):
     def apply_profile_defaults(self, _index=0):
         if not hasattr(self, "target_size_spin"):
             return
-        profile = PRESET_PROFILES[self.profile_combo.currentData()]
+        profile = self.profiles[self.profile_combo.currentData()]
         self._set_combo_data(self.mode_combo, profile.mode)
         if profile.target_mb is not None:
             self.target_size_spin.setValue(profile.target_mb)
@@ -436,6 +452,32 @@ class QueueVideoCompressorWindow(QMainWindow):
         target_mode = self.mode_combo.currentData() == "target-size"
         self.target_size_spin.setEnabled(target_mode)
         self.crf_spin.setEnabled(not target_mode)
+
+    def export_preset_file(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Presets", "videocrush-presets.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            export_presets(Path(path), self.profiles)
+            self.status_label.setText(f"Presets exported: {path}")
+        except VideoCrushError as exc:
+            self.status_label.setText(f"Preset export failed: {exc}")
+
+    def import_preset_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import Presets", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            imported = import_presets(Path(path))
+            self.profiles.update(imported)
+            current = self.profile_combo.currentData()
+            self.profile_combo.clear()
+            for name in self.profiles:
+                self.profile_combo.addItem(name, name)
+            self._set_combo_data(self.profile_combo, current)
+            self.status_label.setText(f"Imported {len(imported)} preset(s)")
+        except VideoCrushError as exc:
+            self.status_label.setText(f"Preset import failed: {exc}")
 
     def _load_file_info(self, path):
         if not os.path.isfile(path):
@@ -633,11 +675,23 @@ class QueueVideoCompressorWindow(QMainWindow):
             self.pause_btn.setEnabled(False)
             self.cancel_btn.setEnabled(False)
             self._save_queue()
+            action = self.after_queue_combo.currentData()
+            if action != "none" and not self._stop_after_current:
+                try:
+                    perform_power_action(action)
+                except VideoCrushError as exc:
+                    self.log_text.append(f"⚠ Post-queue action failed: {exc}")
             return
         self._current_job_id = job.id
         job.state = "running"
         job.attempts += 1
-        settings = settings_from_profile(job.preset, Path(job.input_path), Path(job.output_path), **job.overrides)
+        settings = settings_from_profile(
+            job.preset,
+            Path(job.input_path),
+            Path(job.output_path),
+            profiles=self.profiles,
+            **job.overrides,
+        )
         self.log_text.setPlainText("")
         self.progress_bar.setValue(0)
         self.status_label.setText(f"Starting {job.name}")

@@ -6,8 +6,22 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
+
+from videocrush_automation import (
+    build_task_scheduler_command,
+    discover_watch_files,
+    export_presets,
+    import_presets,
+    install_context_menu,
+    parse_watch_rules,
+    perform_power_action,
+    register_task,
+    remove_context_menu,
+    route_watch_file,
+)
 
 from videocrush_core import (
     PRESET_PROFILES,
@@ -28,9 +42,9 @@ def _parser() -> argparse.ArgumentParser:
         description="Compress one video or a folder of videos with FFmpeg.",
     )
     parser.add_argument("--version", action="version", version=f"VideoCrush {VERSION}")
-    parser.add_argument("--input", "-i", required=True, help="Input video file or folder.")
-    parser.add_argument("--out", "--output", "-o", required=True, help="Output folder or exact output file.")
-    parser.add_argument("--preset", choices=sorted(PRESET_PROFILES), default="web-1080p", help="Compression profile.")
+    parser.add_argument("--input", "-i", help="Input video file or folder.")
+    parser.add_argument("--out", "--output", "-o", help="Output folder or exact output file.")
+    parser.add_argument("--preset", default="web-1080p", help="Compression profile.")
     parser.add_argument("--recursive", action="store_true", help="Recurse into subfolders when input is a folder.")
     parser.add_argument("--extensions", help="Comma-separated extension filter, such as mp4,mkv.")
     parser.add_argument("--mode", choices=("target-size", "quality"), help="Override the profile's encoding mode.")
@@ -54,6 +68,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scene-crf", action="store_true", help="Enable AV1 scene-change and delta-Q tuning.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running FFmpeg.")
     parser.add_argument("--export-script", help="Write the generated command(s) to a .bat or .sh file.")
+    parser.add_argument("--export-presets", help="Export built-in or imported profiles to JSON.")
+    parser.add_argument("--import-presets", help="Import profiles from a versioned JSON file.")
+    parser.add_argument("--watch", help="Watch a folder and encode newly stable files.")
+    parser.add_argument("--watch-rule", action="append", default=[], help="Route extension to profile, e.g. .mov=web-1080p.")
+    parser.add_argument("--watch-once", action="store_true", help="Scan a watch folder once and exit.")
+    parser.add_argument("--watch-interval", type=float, default=5.0, help="Watch polling interval in seconds.")
+    parser.add_argument("--schedule-name", help="Task Scheduler task name to create.")
+    parser.add_argument("--schedule", choices=("MINUTE", "HOURLY", "DAILY", "WEEKLY"), help="Task Scheduler cadence.")
+    parser.add_argument("--register-schedule", action="store_true", help="Register the generated scheduled task.")
+    parser.add_argument("--context-menu", choices=("install", "remove"), help="Install/remove the current-user Explorer action.")
+    parser.add_argument("--after-queue", choices=("none", "sleep", "shutdown"), default="none", help="Explicit post-queue power action.")
     parser.add_argument("--json", action="store_true", help="Emit one machine-readable result object per input.")
     return parser
 
@@ -99,74 +124,156 @@ def _emit(args: argparse.Namespace, payload: dict) -> None:
         print(payload.get("message", json.dumps(payload, sort_keys=True)))
 
 
+def _process_item(
+    args: argparse.Namespace,
+    item: Path,
+    output: Path,
+    preset: str,
+    profiles: Dict[str, object],
+    multiple: bool,
+) -> bool:
+    output_path = output_path_for(
+        item,
+        output,
+        output_format=profiles[preset].output_format,
+        multiple=multiple,
+    )
+    settings = settings_from_profile(preset, item, output_path, profiles=profiles, **_overrides(args))
+    try:
+        if args.dry_run or args.export_script:
+            from videocrush_core import build_ffmpeg_commands, find_ffmpeg, probe_video
+
+            info = probe_video(item)
+            commands = build_ffmpeg_commands(settings, info=info, ffmpeg=find_ffmpeg() or "ffmpeg")
+            shell = "cmd" if os.name == "nt" else "sh"
+            if args.export_script:
+                script_path = Path(args.export_script).expanduser().resolve()
+                if multiple:
+                    script_path = script_path.with_name(
+                        f"{script_path.stem}_{item.stem}{script_path.suffix or ('.bat' if os.name == 'nt' else '.sh')}"
+                    )
+                script_path.parent.mkdir(parents=True, exist_ok=True)
+                script_path.write_text(commands_to_script(commands, shell), encoding="utf-8")
+                _emit(args, {"ok": True, "input": str(item), "script": str(script_path), "message": f"Wrote command script: {script_path}"})
+            if args.dry_run:
+                for command in commands:
+                    _emit(args, {"ok": True, "input": str(item), "command": command, "message": " ".join(command)})
+                return True
+
+        def progress(value: int) -> None:
+            if not args.json:
+                print(f"\r{item.name}: {value:3d}%", end="", file=sys.stderr, flush=True)
+
+        result = run_compression(
+            settings,
+            progress_callback=progress,
+            log_callback=(lambda message: print(message, file=sys.stderr)) if not args.json else None,
+        )
+        if not args.json:
+            print(file=sys.stderr)
+        _emit(
+            args,
+            {
+                "ok": True,
+                "input": str(result.input_path),
+                "output": str(result.output_path),
+                "input_size": result.input_size,
+                "output_size": result.output_size,
+                "saved_percent": round(result.saved_percent, 2),
+                "message": f"{result.input_path.name} -> {result.output_path} ({format_size(result.output_size)}, saved {result.saved_percent:.1f}%)",
+            },
+        )
+        return True
+    except (VideoCrushError, OSError, ValueError) as exc:
+        _emit(args, {"ok": False, "input": str(item), "error": str(exc), "message": f"{item.name}: {exc}"})
+        return False
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parser().parse_args(argv)
-    input_path = Path(args.input).expanduser().resolve()
-    output = Path(args.out).expanduser().resolve()
-    extensions = args.extensions.split(",") if args.extensions else None
-    inputs = collect_input_files(input_path, recursive=args.recursive, extensions=extensions)
-    if not inputs:
-        _emit(args, {"ok": False, "error": f"No supported video files found in {input_path}."})
+    profiles = dict(PRESET_PROFILES)
+    try:
+        if args.import_presets:
+            profiles.update(import_presets(Path(args.import_presets).expanduser().resolve()))
+        if args.export_presets:
+            path = export_presets(Path(args.export_presets).expanduser().resolve(), profiles)
+            _emit(args, {"ok": True, "presets": str(path), "message": f"Wrote presets: {path}"})
+        if args.context_menu:
+            if args.context_menu == "install":
+                install_context_menu(Path(sys.argv[0]).resolve(), args.preset)
+                _emit(args, {"ok": True, "message": "Installed the current-user VideoCrush context-menu action."})
+            else:
+                remove_context_menu()
+                _emit(args, {"ok": True, "message": "Removed the current-user VideoCrush context-menu action."})
+            if not args.input and not args.watch and not args.schedule:
+                return 0
+        if (args.export_presets or args.import_presets) and not args.input and not args.watch and not args.schedule:
+            return 0
+        if args.schedule:
+            if not args.input or not args.out or not args.schedule_name:
+                _emit(args, {"ok": False, "error": "--schedule requires --schedule-name, --input, and --out."})
+                return 2
+            command = build_task_scheduler_command(
+                args.schedule_name,
+                Path(sys.argv[0]).resolve(),
+                Path(args.input).expanduser().resolve(),
+                Path(args.out).expanduser().resolve(),
+                args.preset,
+                args.schedule,
+            )
+            if args.register_schedule:
+                register_task(command)
+                _emit(args, {"ok": True, "message": f"Registered scheduled task: {args.schedule_name}"})
+            else:
+                _emit(args, {"ok": True, "command": command, "message": " ".join(command)})
+            return 0
+        if args.preset not in profiles:
+            _emit(args, {"ok": False, "error": f"Unknown preset profile: {args.preset}."})
+            return 2
+        if args.watch:
+            rules = parse_watch_rules(args.watch_rule)
+            output = Path(args.out).expanduser().resolve() if args.out else Path(args.watch).resolve() / "compressed"
+            output.mkdir(parents=True, exist_ok=True)
+            seen: Set[str] = set()
+            failures = 0
+            while True:
+                discovered = discover_watch_files(Path(args.watch), seen, rules, recursive=args.recursive)
+                for item, _ in discovered:
+                    preset = route_watch_file(item, rules, args.preset)
+                    if preset not in profiles:
+                        _emit(args, {"ok": False, "input": str(item), "error": f"Unknown routed preset: {preset}"})
+                        failures += 1
+                        seen.add(str(item.resolve()).lower())
+                        continue
+                    if _process_item(args, item, output, preset, profiles, multiple=True):
+                        seen.add(str(item.resolve()).lower())
+                    else:
+                        failures += 1
+                if args.watch_once:
+                    if failures == 0 and args.after_queue != "none" and not args.dry_run:
+                        perform_power_action(args.after_queue)
+                    return 1 if failures else 0
+                time.sleep(max(0.5, args.watch_interval))
+        if not args.input or not args.out:
+            _emit(args, {"ok": False, "error": "--input and --out are required for compression."})
+            return 2
+        input_path = Path(args.input).expanduser().resolve()
+        output = Path(args.out).expanduser().resolve()
+        extensions = args.extensions.split(",") if args.extensions else None
+        inputs = collect_input_files(input_path, recursive=args.recursive, extensions=extensions)
+        if not inputs:
+            _emit(args, {"ok": False, "error": f"No supported video files found in {input_path}."})
+            return 2
+        multiple = len(inputs) > 1
+        if multiple or input_path.is_dir():
+            output.mkdir(parents=True, exist_ok=True)
+        failures = sum(not _process_item(args, item, output, args.preset, profiles, multiple or input_path.is_dir()) for item in inputs)
+        if failures == 0 and args.after_queue != "none" and not args.dry_run:
+            perform_power_action(args.after_queue)
+        return 1 if failures else 0
+    except (VideoCrushError, OSError, ValueError) as exc:
+        _emit(args, {"ok": False, "error": str(exc), "message": str(exc)})
         return 2
-    multiple = len(inputs) > 1
-    if multiple or input_path.is_dir():
-        output.mkdir(parents=True, exist_ok=True)
-    overrides = _overrides(args)
-    failures = 0
-    for item in inputs:
-        output_path = output_path_for(
-            item,
-            output,
-            output_format=PRESET_PROFILES[args.preset].output_format,
-            multiple=multiple or input_path.is_dir(),
-        )
-        settings = settings_from_profile(args.preset, item, output_path, **overrides)
-        try:
-            if args.dry_run or args.export_script:
-                from videocrush_core import build_ffmpeg_commands, find_ffmpeg, probe_video
-
-                info = probe_video(item)
-                commands = build_ffmpeg_commands(settings, info=info, ffmpeg=find_ffmpeg() or "ffmpeg")
-                shell = "cmd" if os.name == "nt" else "sh"
-                if args.export_script:
-                    script_path = Path(args.export_script).expanduser().resolve()
-                    if multiple:
-                        script_path = script_path.with_name(f"{script_path.stem}_{item.stem}{script_path.suffix or ('.bat' if os.name == 'nt' else '.sh')}")
-                    script_path.parent.mkdir(parents=True, exist_ok=True)
-                    script_path.write_text(commands_to_script(commands, shell), encoding="utf-8")
-                    _emit(args, {"ok": True, "input": str(item), "script": str(script_path), "message": f"Wrote command script: {script_path}"})
-                if args.dry_run:
-                    for command in commands:
-                        _emit(args, {"ok": True, "input": str(item), "command": command, "message": " ".join(command)})
-                if args.dry_run:
-                    continue
-            def progress(value: int) -> None:
-                if not args.json:
-                    print(f"\r{item.name}: {value:3d}%", end="", file=sys.stderr, flush=True)
-
-            result = run_compression(
-                settings,
-                progress_callback=progress,
-                log_callback=(lambda message: print(message, file=sys.stderr)) if not args.json else None,
-            )
-            if not args.json:
-                print(file=sys.stderr)
-            _emit(
-                args,
-                {
-                    "ok": True,
-                    "input": str(result.input_path),
-                    "output": str(result.output_path),
-                    "input_size": result.input_size,
-                    "output_size": result.output_size,
-                    "saved_percent": round(result.saved_percent, 2),
-                    "message": f"{result.input_path.name} -> {result.output_path} ({format_size(result.output_size)}, saved {result.saved_percent:.1f}%)",
-                },
-            )
-        except (VideoCrushError, OSError, ValueError) as exc:
-            failures += 1
-            _emit(args, {"ok": False, "input": str(item), "error": str(exc), "message": f"{item.name}: {exc}"})
-    return 1 if failures else 0
 
 
 if __name__ == "__main__":

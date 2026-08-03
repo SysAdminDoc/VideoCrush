@@ -19,7 +19,7 @@ gui = ["PyQt6>=6.6"]
 videocrush = "videocrush_cli:main"
 
 [tool.setuptools]
-py-modules = ["videocrush_core", "videocrush_cli", "videocrush_queue", "video_compressor_queue"]
+py-modules = ["videocrush_core", "videocrush_cli", "videocrush_queue", "videocrush_automation", "video_compressor_queue"]
 
 [tool.ruff]
 line-length = 120

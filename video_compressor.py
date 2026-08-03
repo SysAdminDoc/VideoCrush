@@ -4,8 +4,18 @@ VideoCrush v0.1.0 — Professional Video Compressor
 Target-size video compression with 2-pass encoding via FFmpeg.
 """
 
-import sys, os, subprocess, json, time, re, shutil, math
+import sys, os, subprocess, json, time, re, shutil, math, threading
 from pathlib import Path
+
+from videocrush_core import (
+    VERSION as CORE_VERSION,
+    AUDIO_CODECS as CORE_AUDIO_CODECS,
+    VIDEO_CODECS as CORE_VIDEO_CODECS,
+    VIDEO_EXTENSIONS as CORE_VIDEO_EXTENSIONS,
+    CompressionSettings,
+    VideoCrushError,
+    run_compression,
+)
 
 
 # codex-branding:start
@@ -57,12 +67,12 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QProcess
 from PyQt6.QtGui import QFont, QIcon, QColor, QPalette, QDragEnterEvent, QDropEvent
 
 # ── Version ────────────────────────────────────────────────────────────────────
-VERSION = "0.1.0"
+VERSION = CORE_VERSION
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.ts', '.vob', '.3gp'}
-AUDIO_CODECS = {'aac': 'aac', 'opus': 'libopus', 'copy': 'copy', 'none': 'an'}
-VIDEO_CODECS = {'H.264 (libx264)': 'libx264', 'H.265 (libx265)': 'libx265', 'VP9': 'libvpx-vp9', 'AV1 (SVT)': 'libsvtav1'}
+VIDEO_EXTENSIONS = set(CORE_VIDEO_EXTENSIONS)
+AUDIO_CODECS = dict(CORE_AUDIO_CODECS)
+VIDEO_CODECS = dict(CORE_VIDEO_CODECS)
 OUTPUT_FORMATS = {'mp4': '.mp4', 'mkv': '.mkv', 'webm': '.webm'}
 PRESETS = {'ultrafast': 'ultrafast', 'superfast': 'superfast', 'veryfast': 'veryfast',
            'faster': 'faster', 'fast': 'fast', 'medium': 'medium',
@@ -221,9 +231,11 @@ class CompressionWorker(QThread):
         self.resolution = resolution
         self.audio_bitrate = audio_bitrate
         self._cancelled = False
+        self._cancel_event = threading.Event()
 
     def cancel(self):
         self._cancelled = True
+        self._cancel_event.set()
 
     def run(self):
         try:
@@ -427,6 +439,41 @@ class CompressionWorker(QThread):
             if remaining:
                 self.log.emit(f"  ⚠ {remaining[-500:]}")
         self.progress.emit(100)
+
+    def run(self):
+        """Run the shared, machine-readable FFmpeg core from the Qt thread."""
+        settings = CompressionSettings(
+            input_path=Path(self.input_path),
+            output_path=Path(self.output_path),
+            video_codec=self.video_codec,
+            audio_codec=self.audio_codec,
+            encode_preset=self.preset,
+            resolution=self.resolution,
+            audio_bitrate=self.audio_bitrate,
+            mode="target-size",
+            target_mb=self.target_mb,
+            two_pass=True,
+        )
+        try:
+            result = run_compression(
+                settings,
+                progress_callback=self.progress.emit,
+                log_callback=self.log.emit,
+                status_callback=self.status.emit,
+                cancel_event=self._cancel_event,
+            )
+            self.finished.emit({
+                'output': str(result.output_path),
+                'size': result.output_size,
+                'ratio': result.saved_percent,
+            })
+        except VideoCrushError as exc:
+            if self._cancelled:
+                self.status.emit("Cancelled")
+            else:
+                self.error.emit(str(exc))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
 # ── Drop Zone Widget ───────────────────────────────────────────────────────────

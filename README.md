@@ -27,10 +27,25 @@ python video_compressor.py
 
 Dependencies auto-install on first run. Requires FFmpeg (auto-detected).
 
+The same encoder is available without a GUI for automation:
+
+```bash
+python videocrush_cli.py --input ./in --preset web-1080p --out ./out --recursive
+videocrush --input ./in --preset email-10mb --out ./out --recursive
+```
+
+Use `--mode quality --crf 24` for quality-targeted output, `--dry-run` to
+inspect the generated FFmpeg invocation, and `--export-script commands.bat`
+to save a reproducible command script. The CLI accepts a file or folder and
+can emit JSON results with `--json`.
+
 ## Requirements
 
 - Python 3.8+
 - FFmpeg
+
+For the optional installed `videocrush` command, install the project with
+`pip install .`; the GUI dependency remains optional via `pip install .[gui]`.
 
 ## Related Tools
 
